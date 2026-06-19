@@ -1,17 +1,15 @@
 # plot_review_trend.py
 
 import argparse
+import json
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import matplotlib.pyplot as plt
 from bs4 import BeautifulSoup
-from dateutil import parser as date_parser
-
-from datetime import datetime
-import re
 from dateutil import parser as date_parser
 
 DEFAULT_YEAR_FOR_YEARLESS_DATES = 2026
@@ -49,6 +47,36 @@ def parse_review_date(raw_date: str) -> datetime:
             parsed = parsed.replace(year=CURRENT_YEAR - 1)
 
     return parsed
+
+def extract_release_date(html_text: str) -> Optional[datetime]:
+    """
+    Look for a <page-media-reviews-manager> block, parse its JSON props,
+    and return media.theaterReleaseDate as a datetime if present.
+    Returns None when the block, the JSON, or the field is missing.
+    """
+    soup = BeautifulSoup(html_text, "html.parser")
+    manager = soup.find("page-media-reviews-manager")
+    if manager is None:
+        return None
+
+    script = manager.find("script", attrs={"data-json": "props"})
+    if script is None or not script.string:
+        return None
+
+    try:
+        props = json.loads(script.string)
+    except json.JSONDecodeError:
+        return None
+
+    raw_date = props.get("media", {}).get("theaterReleaseDate")
+    if not raw_date:
+        return None
+
+    try:
+        return date_parser.parse(raw_date)
+    except (ValueError, TypeError):
+        return None
+
 
 def extract_reviews(html_text: str) -> pd.DataFrame:
     soup = BeautifulSoup(html_text, "html.parser")
@@ -106,7 +134,11 @@ def build_cumulative_trend(df: pd.DataFrame) -> pd.DataFrame:
     return daily
 
 
-def plot_trend(trend: pd.DataFrame, output_path: str) -> None:
+def plot_trend(
+    trend: pd.DataFrame,
+    output_path: str,
+    release_date: Optional[datetime] = None,
+) -> None:
     plt.figure(figsize=(10, 6))
 
     min_y = min(trend["percent_positive_to_date"])
@@ -115,6 +147,16 @@ def plot_trend(trend: pd.DataFrame, output_path: str) -> None:
         trend["percent_positive_to_date"],
         marker="o",
     )
+
+    if release_date is not None:
+        plt.axvline(
+            release_date.date(),
+            color="red",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Theater release ({release_date.date()})",
+        )
+        plt.legend()
 
     plt.xlabel("Date")
     plt.ylabel("Percent positive reviews up to date")
@@ -142,6 +184,15 @@ def main() -> None:
         default=None,
         help="Optional path to save the computed trend as a CSV file",
     )
+    parser.add_argument(
+        "--release-date",
+        default=None,
+        help=(
+            "Theater release date to draw as a vertical line "
+            "(e.g. 'Dec 14, 2018' or '2018-12-14'). "
+            "Overrides the value extracted from the HTML."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -150,13 +201,26 @@ def main() -> None:
     reviews = extract_reviews(html_text)
     trend = build_cumulative_trend(reviews)
 
+    if args.release_date:
+        try:
+            release_date = date_parser.parse(args.release_date)
+        except (ValueError, TypeError):
+            raise SystemExit(
+                f"Could not parse --release-date value: {args.release_date!r}"
+            )
+    else:
+        release_date = extract_release_date(html_text)
+
     if args.csv:
         trend.to_csv(args.csv, index=False)
 
-    plot_trend(trend, args.output)
+    plot_trend(trend, args.output, release_date=release_date)
 
     print(f"Parsed {len(reviews)} reviews.")
     print(f"Saved graph to {args.output}")
+
+    if release_date is not None:
+        print(f"Marked theater release date: {release_date.date()}")
 
     if args.csv:
         print(f"Saved trend data to {args.csv}")
