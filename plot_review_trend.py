@@ -57,25 +57,26 @@ def extract_release_date(html_text: str) -> Optional[datetime]:
     soup = BeautifulSoup(html_text, "html.parser")
     manager = soup.find("page-media-reviews-manager")
     if manager is None:
-        return None
+        return None, None
 
     script = manager.find("script", attrs={"data-json": "props"})
     if script is None or not script.string:
-        return None
+        return None, None
 
     try:
         props = json.loads(script.string)
     except json.JSONDecodeError:
-        return None
+        return None, None
 
+    title = props.get("media", {}).get("title")
     raw_date = props.get("media", {}).get("theaterReleaseDate")
-    if not raw_date:
-        return None
+    if not (title or raw_date):
+        return None, None
 
     try:
-        return date_parser.parse(raw_date)
+        return title, date_parser.parse(raw_date)
     except (ValueError, TypeError):
-        return None
+        return None, None
 
 
 def extract_reviews(html_text: str) -> pd.DataFrame:
@@ -137,6 +138,7 @@ def build_cumulative_trend(df: pd.DataFrame) -> pd.DataFrame:
 def plot_trend(
     trend: pd.DataFrame,
     output_path: str,
+    title: Optional[str],
     release_date: Optional[datetime] = None,
 ) -> None:
     plt.figure(figsize=(10, 6))
@@ -160,8 +162,8 @@ def plot_trend(
 
     plt.xlabel("Date")
     plt.ylabel("Percent positive reviews up to date")
-    plt.title("Cumulative Positive Review Percentage Over Time")
-    plt.ylim(min_y, 100)
+    plt.title(f"{title}: Cumulative Positive Review Percentage Over Time")
+    plt.ylim(min_y-5, 100)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
 
@@ -201,6 +203,7 @@ def main() -> None:
     reviews = extract_reviews(html_text)
     trend = build_cumulative_trend(reviews)
 
+    title, release_date = extract_release_date(html_text)
     if args.release_date:
         try:
             release_date = date_parser.parse(args.release_date)
@@ -208,13 +211,15 @@ def main() -> None:
             raise SystemExit(
                 f"Could not parse --release-date value: {args.release_date!r}"
             )
-    else:
-        release_date = extract_release_date(html_text)
 
     if args.csv:
         trend.to_csv(args.csv, index=False)
 
-    plot_trend(trend, args.output, release_date=release_date)
+    if title:
+        output_path = f"{title}_review_trend.png"
+    else:
+        output_path = "args.output"
+    plot_trend(trend, output_path, title=title, release_date=release_date)
 
     print(f"Parsed {len(reviews)} reviews.")
     print(f"Saved graph to {args.output}")
