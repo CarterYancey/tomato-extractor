@@ -3,9 +3,9 @@
 import argparse
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -14,6 +14,7 @@ from dateutil import parser as date_parser
 
 DEFAULT_YEAR_FOR_YEARLESS_DATES = 2026
 CURRENT_YEAR = datetime.now().year  # Dynamically get the current year
+DEFAULT_DAYS_AFTER_THEATER_RELEASE = 7
 
 def parse_review_date(raw_date: str) -> datetime:
     """
@@ -48,11 +49,23 @@ def parse_review_date(raw_date: str) -> datetime:
 
     return parsed
 
-def extract_release_date(html_text: str) -> Optional[datetime]:
+def _parse_props_date(props: dict, field: str) -> Optional[datetime]:
+    raw_date = props.get("media", {}).get(field)
+    if not raw_date:
+        return None
+    try:
+        return date_parser.parse(raw_date)
+    except (ValueError, TypeError):
+        return None
+
+
+def extract_release_dates(
+    html_text: str,
+) -> Tuple[Optional[datetime], Optional[datetime]]:
     """
     Look for a <page-media-reviews-manager> block, parse its JSON props,
-    and return media.theaterReleaseDate as a datetime if present.
-    Returns None when the block, the JSON, or the field is missing.
+    and return (theaterReleaseDate, streamingReleaseDate) as datetimes.
+    Either value is None when the block, the JSON, or the field is missing.
     """
     soup = BeautifulSoup(html_text, "html.parser")
     manager = soup.find("page-media-reviews-manager")
@@ -68,15 +81,11 @@ def extract_release_date(html_text: str) -> Optional[datetime]:
     except json.JSONDecodeError:
         return None, None
 
-    title = props.get("media", {}).get("title")
-    raw_date = props.get("media", {}).get("theaterReleaseDate")
-    if not (title or raw_date):
-        return None, None
+    return (
+        _parse_props_date(props, "theaterReleaseDate"),
+        _parse_props_date(props, "streamingReleaseDate"),
+    )
 
-    try:
-        return title, date_parser.parse(raw_date)
-    except (ValueError, TypeError):
-        return None, None
 
 
 def extract_reviews(html_text: str) -> pd.DataFrame:
@@ -138,9 +147,17 @@ def build_cumulative_trend(df: pd.DataFrame) -> pd.DataFrame:
 def plot_trend(
     trend: pd.DataFrame,
     output_path: str,
-    title: Optional[str],
-    release_date: Optional[datetime] = None,
+    theater_release_date: Optional[datetime] = None,
+    streaming_release_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+
 ) -> None:
+    if end_date is not None:
+        trend = trend[trend["date"] <= end_date.date()]
+
+    if trend.empty:
+        raise SystemExit("No review data falls within the requested date range.")
+
     plt.figure(figsize=(10, 6))
 
     min_y = min(trend["percent_positive_to_date"])
@@ -150,14 +167,28 @@ def plot_trend(
         marker="o",
     )
 
-    if release_date is not None:
+    has_label = False
+    if theater_release_date is not None:
         plt.axvline(
-            release_date.date(),
+            theater_release_date.date(),
             color="red",
             linestyle="--",
             linewidth=1.5,
-            label=f"Theater release ({release_date.date()})",
+            label=f"Theater release ({theater_release_date.date()})",
         )
+        has_label = True
+
+    if streaming_release_date is not None:
+        plt.axvline(
+            streaming_release_date.date(),
+            color="blue",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Streaming release ({streaming_release_date.date()})",
+        )
+        has_label = True
+
+    if has_label:
         plt.legend()
 
     plt.xlabel("Date")
@@ -169,6 +200,13 @@ def plot_trend(
 
     plt.savefig(output_path, dpi=200)
     plt.show()
+
+
+def _parse_cli_date(value: str, flag_name: str) -> datetime:
+    try:
+        return date_parser.parse(value)
+    except (ValueError, TypeError):
+        raise SystemExit(f"Could not parse {flag_name} value: {value!r}")
 
 
 def main() -> None:
@@ -195,6 +233,34 @@ def main() -> None:
             "Overrides the value extracted from the HTML."
         ),
     )
+    parser.add_argument(
+        "--streaming-release-date",
+        default=None,
+        help=(
+            "Streaming release date to draw as a vertical line "
+            "(e.g. 'Apr 28, 2026' or '2026-04-28'). "
+            "Overrides the value extracted from the HTML."
+        ),
+    )
+    end_group = parser.add_mutually_exclusive_group()
+    end_group.add_argument(
+        "--end-date",
+        default=None,
+        help=(
+            "Last date to include in the plot "
+            "(e.g. 'Dec 21, 2018' or '2018-12-21'). "
+            f"Defaults to {DEFAULT_DAYS_AFTER_THEATER_RELEASE} days after the "
+            "theater release date when one is available."
+        ),
+    )
+    end_group.add_argument(
+        "--full-history",
+        action="store_true",
+        help=(
+            "Plot the entire review history instead of cutting off "
+            "one week after the theater release date."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -203,29 +269,56 @@ def main() -> None:
     reviews = extract_reviews(html_text)
     trend = build_cumulative_trend(reviews)
 
-    title, release_date = extract_release_date(html_text)
+    extracted_theater, extracted_streaming = extract_release_dates(html_text)
+
     if args.release_date:
-        try:
-            release_date = date_parser.parse(args.release_date)
-        except (ValueError, TypeError):
-            raise SystemExit(
-                f"Could not parse --release-date value: {args.release_date!r}"
-            )
+        theater_release_date = _parse_cli_date(args.release_date, "--release-date")
+    else:
+        theater_release_date = extracted_theater
+
+    if args.streaming_release_date:
+        streaming_release_date = _parse_cli_date(
+            args.streaming_release_date, "--streaming-release-date"
+        )
+    else:
+        streaming_release_date = extracted_streaming
+
+    if args.full_history:
+        end_date: Optional[datetime] = None
+    elif args.end_date:
+        end_date = _parse_cli_date(args.end_date, "--end-date")
+    elif theater_release_date is not None:
+        end_date = theater_release_date + timedelta(
+            days=DEFAULT_DAYS_AFTER_THEATER_RELEASE
+        )
+    else:
+        end_date = None
+
 
     if args.csv:
         trend.to_csv(args.csv, index=False)
 
-    if title:
-        output_path = f"{title}_review_trend.png"
-    else:
-        output_path = "args.output"
-    plot_trend(trend, output_path, title=title, release_date=release_date)
+    plot_trend(
+        trend,
+        args.output,
+        theater_release_date=theater_release_date,
+        streaming_release_date=streaming_release_date,
+        end_date=end_date,
+    )
 
     print(f"Parsed {len(reviews)} reviews.")
     print(f"Saved graph to {args.output}")
 
-    if release_date is not None:
-        print(f"Marked theater release date: {release_date.date()}")
+    if theater_release_date is not None:
+        print(f"Marked theater release date: {theater_release_date.date()}")
+
+    if streaming_release_date is not None:
+        print(f"Marked streaming release date: {streaming_release_date.date()}")
+
+    if end_date is not None:
+        print(f"Plot ends at: {end_date.date()}")
+    else:
+        print("Plot shows the full review history.")
 
     if args.csv:
         print(f"Saved trend data to {args.csv}")
