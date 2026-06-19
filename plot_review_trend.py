@@ -87,6 +87,7 @@ def extract_release_dates(
     )
 
 
+
 def extract_reviews(html_text: str) -> pd.DataFrame:
     soup = BeautifulSoup(html_text, "html.parser")
 
@@ -149,6 +150,7 @@ def plot_trend(
     theater_release_date: Optional[datetime] = None,
     streaming_release_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
+
 ) -> None:
     if end_date is not None:
         trend = trend[trend["date"] <= end_date.date()]
@@ -191,8 +193,8 @@ def plot_trend(
 
     plt.xlabel("Date")
     plt.ylabel("Percent positive reviews up to date")
-    plt.title("Cumulative Positive Review Percentage Over Time")
-    plt.ylim(min_y, 100)
+    plt.title(f"{title}: Cumulative Positive Review Percentage Over Time")
+    plt.ylim(min_y-5, 100)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
 
@@ -291,6 +293,7 @@ def main() -> None:
         )
     else:
         end_date = None
+
 
     if args.csv:
         trend.to_csv(args.csv, index=False)
