@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -49,8 +49,8 @@ def parse_review_date(raw_date: str) -> datetime:
 
     return parsed
 
-def _parse_props_date(props: dict, field: str) -> Optional[datetime]:
-    raw_date = props.get("media", {}).get(field)
+def _parse_media_date(media: dict, field: str) -> Optional[datetime]:
+    raw_date = media.get(field)
     if not raw_date:
         return None
     try:
@@ -59,32 +59,46 @@ def _parse_props_date(props: dict, field: str) -> Optional[datetime]:
         return None
 
 
-def extract_release_dates(
-    html_text: str,
-) -> Tuple[Optional[datetime], Optional[datetime]]:
+def extract_movie_metadata(html_text: str) -> dict:
     """
     Look for a <page-media-reviews-manager> block, parse its JSON props,
-    and return (theaterReleaseDate, streamingReleaseDate) as datetimes.
-    Either value is None when the block, the JSON, or the field is missing.
+    and return {'title', 'theater_release_date', 'streaming_release_date'}.
+    Any value is None when the block, the JSON, or the field is missing.
     """
+    empty = {
+        "title": None,
+        "theater_release_date": None,
+        "streaming_release_date": None,
+    }
+
     soup = BeautifulSoup(html_text, "html.parser")
     manager = soup.find("page-media-reviews-manager")
     if manager is None:
-        return None, None
+        return empty
 
     script = manager.find("script", attrs={"data-json": "props"})
     if script is None or not script.string:
-        return None, None
+        return empty
 
     try:
         props = json.loads(script.string)
     except json.JSONDecodeError:
-        return None, None
+        return empty
 
-    return (
-        _parse_props_date(props, "theaterReleaseDate"),
-        _parse_props_date(props, "streamingReleaseDate"),
-    )
+    media = props.get("media", {}) or {}
+    title = media.get("title")
+    return {
+        "title": title.strip() if isinstance(title, str) and title.strip() else None,
+        "theater_release_date": _parse_media_date(media, "theaterReleaseDate"),
+        "streaming_release_date": _parse_media_date(media, "streamingReleaseDate"),
+    }
+
+
+def slugify_title(title: str) -> str:
+    """Make a movie title safe for use in a filename."""
+    slug = re.sub(r"[^\w\-]+", "_", title)
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    return slug or "review_trend"
 
 
 
@@ -150,7 +164,7 @@ def plot_trend(
     theater_release_date: Optional[datetime] = None,
     streaming_release_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
-
+    movie_title: Optional[str] = None,
 ) -> None:
     if end_date is not None:
         trend = trend[trend["date"] <= end_date.date()]
@@ -193,8 +207,12 @@ def plot_trend(
 
     plt.xlabel("Date")
     plt.ylabel("Percent positive reviews up to date")
-    plt.title(f"{title}: Cumulative Positive Review Percentage Over Time")
-    plt.ylim(min_y-5, 100)
+    base_title = "Cumulative Positive Review Percentage Over Time"
+    if movie_title:
+        plt.title(f"{movie_title}: {base_title}")
+    else:
+        plt.title(base_title)
+    plt.ylim(min_y - 5, 100)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
 
@@ -216,8 +234,12 @@ def main() -> None:
     parser.add_argument("html_file", help="Path to saved HTML source file")
     parser.add_argument(
         "--output",
-        default="review_trend.png",
-        help="Output image filename. Default: review_trend.png",
+        default=None,
+        help=(
+            "Output image filename. "
+            "Defaults to '<MovieTitle>_review_trend.png' when a title can be "
+            "extracted, otherwise 'review_trend.png'."
+        ),
     )
     parser.add_argument(
         "--csv",
@@ -269,7 +291,10 @@ def main() -> None:
     reviews = extract_reviews(html_text)
     trend = build_cumulative_trend(reviews)
 
-    extracted_theater, extracted_streaming = extract_release_dates(html_text)
+    metadata = extract_movie_metadata(html_text)
+    movie_title = metadata["title"]
+    extracted_theater = metadata["theater_release_date"]
+    extracted_streaming = metadata["streaming_release_date"]
 
     if args.release_date:
         theater_release_date = _parse_cli_date(args.release_date, "--release-date")
@@ -294,20 +319,29 @@ def main() -> None:
     else:
         end_date = None
 
+    if args.output:
+        output_path = args.output
+    elif movie_title:
+        output_path = f"{slugify_title(movie_title)}_review_trend.png"
+    else:
+        output_path = "review_trend.png"
 
     if args.csv:
         trend.to_csv(args.csv, index=False)
 
     plot_trend(
         trend,
-        args.output,
+        output_path,
         theater_release_date=theater_release_date,
         streaming_release_date=streaming_release_date,
         end_date=end_date,
+        movie_title=movie_title,
     )
 
     print(f"Parsed {len(reviews)} reviews.")
-    print(f"Saved graph to {args.output}")
+    if movie_title:
+        print(f"Detected movie title: {movie_title}")
+    print(f"Saved graph to {output_path}")
 
     if theater_release_date is not None:
         print(f"Marked theater release date: {theater_release_date.date()}")
