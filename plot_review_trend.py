@@ -10,9 +10,12 @@ import matplotlib.pyplot as plt
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
+from datetime import datetime
+import re
+from dateutil import parser as date_parser
 
 DEFAULT_YEAR_FOR_YEARLESS_DATES = 2026
-
+CURRENT_YEAR = datetime.now().year  # Dynamically get the current year
 
 def parse_review_date(raw_date: str) -> datetime:
     """
@@ -22,7 +25,8 @@ def parse_review_date(raw_date: str) -> datetime:
       - 09/04/2023
       - Apr 1, 2024
 
-    If no year is present, use 2026.
+    If no year is present, determine if the month is in the future.
+    If it is, use the current year. If not, use the previous year.
     """
     raw_date = raw_date.strip()
 
@@ -37,11 +41,14 @@ def parse_review_date(raw_date: str) -> datetime:
         dayfirst=False,
     )
 
+
     if not has_year:
-        parsed = parsed.replace(year=DEFAULT_YEAR_FOR_YEARLESS_DATES)
+        today = datetime.now()
+        if parsed.month > today.month or (parsed.month == today.month and parsed.day > today.day):
+            # Date is in the future, use the current year
+            parsed = parsed.replace(year=CURRENT_YEAR - 1)
 
     return parsed
-
 
 def extract_reviews(html_text: str) -> pd.DataFrame:
     soup = BeautifulSoup(html_text, "html.parser")
